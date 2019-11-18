@@ -1,0 +1,467 @@
+---
+title: "Single cell RNA-seq"
+author: "L??onard H??rault"
+date: "November 12, 2019"
+output: html_document
+bibliography: biblio.bibtex
+---
+
+## Introduction
+
+This tutorial describe classical analysis of single-cell RNA seq data.
+We will use first public data of HSPCs generated with DropSeq protocol [@rodriguez2018clonal].
+First we will follow the very popular Seurat workflow [@stuart2019comprehensive].
+
+```{r loadEnv, include=TRUE}
+library(Seurat)
+library(tidyverse)
+library(gProfileR)
+library(scran)
+library(ggplot2)
+```
+
+## Download the data
+
+```{r downloadData}
+
+LTHSC <- "ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM2411nnn/GSM2411664/suppl/GSM2411664_LTHSC.raw_umifm_counts.csv.gz"
+STHSC <- "ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM2411nnn/GSM2411668/suppl/GSM2411668_STHSC.raw_umifm_counts.csv.gz"
+MPP2 <- "ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM2411nnn/GSM2411665/suppl/GSM2411665_MPP2.raw_umifm_counts.csv.gz"
+MPP3 <- "ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM2411nnn/GSM2411666/suppl/GSM2411666_MPP3.raw_umifm_counts.csv.gz"
+MPP4 <- "ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM2411nnn/GSM2411667/suppl/GSM2411667_MPP4.raw_umifm_counts.csv.gz"
+
+rodriguezDataUrl <- list(LTHSC,STHSC,MPP2,MPP3)
+
+downloadRodriguez <- function(url) {
+  dir.create("RodriguezData/",showWarnings = F)
+  download.file(url, destfile = paste0("RodriguezData/",basename(url)), method = "wget")
+
+}
+
+lapply(rodriguezDataUrl, downloadRodriguez)
+```
+
+## Load the data
+
+```{r loadData}
+
+files <- list.files("RodriguezData/",full.names = T) 
+datasets <- lapply(files, read_csv)
+
+rodriguezData <- rbind(datasets[[1]],datasets[[2]],datasets[[3]],datasets[[4]])
+
+rodriguezData[c(1:10),c(1:10)]
+```
+
+## Create the Seurat object
+
+Now we can create the seurat object using the CreateSeuratObject function.
+
+```{r toSeurat, echo=FALSE}
+phenoData <- rodriguezData[,c(1:5)]
+rownames(phenoData) <- rodriguezData$cell_id
+data <- rodriguezData[,c(6:ncol(rodriguezData))]
+rownames(data) <- rodriguezData$cell_id
+seurat <- CreateSeuratObject(counts = t(data),meta.data = phenoData)
+
+seurat
+```
+
+Phenotypic data of the cells are stored in the meta.data slot.
+We can access row count using the GetAssayData function, the number of genes and cells with the nrow and ncol functions respectively.
+
+```{r}
+head(seurat@meta.data)
+GetAssayData(seurat)[c(1:5),c(1:5)]
+nrow(seurat)
+ncol(seurat)
+```
+
+## Preprocessing of the data
+
+Before the analysis of the dataset, we need to filter out poor quality cells such as doublet, lysed and dying/stresed cells.
+Dying and highly stressed cells can be identified by their high expression of mitochondrial genes.
+We calculate mitochondrial QC metrics with the PercentageFeatureSet function, which calculates the percentage of counts originating from a set of features.
+We use the set of all genes starting with MT- as a set of mitochondrial genes.
+```{r}
+seurat$percent.mt <- PercentageFeatureSet(seurat, pattern = "^mt-")
+```
+
+Number of genes expressed by each cell as well as number of total UMI counted in each cell were calculated by seurat during the creation of the seurat object and are stored in the meta.data slot. 
+We can now vizualize this different qc metrics and try to detect outliers that are poor quality cells with the VlnPLot function.
+```{r}
+# Visualize QC metrics as a violin plot
+VlnPlot(seurat, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),pt.size = 0.1, ncol = 3)
+```
+
+We can also use the FeatureScatter function to observe correlation between the qc metrics.
+```{r}
+plot1 <- FeatureScatter(seurat, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(seurat, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+CombinePlots(plots = list(plot1, plot2),ncol = 1)
+```
+
+In their study [@rodriguez2018clonal] Rodriguez et al filter out cells with few mRNA counts (< 1000 UMIs) and stressed cells (mitochondrial gene-set Z-score > 1). They stored the results of the filtering in the pass_filter column of their files that we stored in the meta.data of our object.
+
+```{r}
+plot3 <- FeatureScatter(seurat, feature2 = "nCount_RNA", feature1 = "pass_filter")
+plot4 <- FeatureScatter(seurat, feature2 = "percent.mt", feature1 = "pass_filter")
+plot5 <- FeatureScatter(seurat, feature2 = "nFeature_RNA", feature1 = "pass_filter")
+CombinePlots(plots = list(plot3,plot4, plot5))
+```
+
+We use their filtering to filter out the poor quality cells with the subset function.
+```{r}
+seurat <- subset(x = seurat, subset = pass_filter > 0.1)
+```
+
+We can now check the results of the filtering like previously with the FeatureScatter function.
+```{r}
+plot1 <- FeatureScatter(seurat, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(seurat, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+CombinePlots(plots = list(plot1, plot2),ncol = 1)
+```
+
+## Filtering non expressed genes
+A lot of genes are lowly expressed by the cells and detected in just few cells in the dataset.
+This can lead to unwanted noise in the analysis and longer time for the computing steps.
+To avoid it we keep only genes expressed in at least 0.01% percent of the remaining cells.
+
+```{r}
+# First we create a data frame for genes information fdata 
+fdata <- data.frame(gene_short_name = rownames(seurat),num_cells_expressed = NA) 
+rownames(fdata) <- fdata$gene_short_name
+# We compute the for each gene the number of cells that expressed it with the rowSums function
+fdata$num_cells_expressed <- rowSums(as.matrix(GetAssayData(seurat)))
+# we then compute the desired cut off
+cutOffExpressingCells <- 0.001*ncol(seurat)
+#We mark genes that are above the cut off
+fdata$kept_genes <- fdata$num_cells_expressed > cutOffExpressingCells
+# We finally update our seurat objetc removing the non expressed genes using the CreateSeuratObject and GetAssayData functions
+seurat <- CreateSeuratObject(counts = GetAssayData(seurat)[which(fdata$kept_genes),],meta.data = seurat@meta.data)
+
+```
+
+
+## Normalizing the data
+
+Once unwanted cells are removed we normalized the data. We use the standard Seurat normalisation. It employs a global-scaling normalization method ???LogNormalize??? that normalizes the feature expression measurements for each cell by the total expression, multiplies this by a scale factor (10,000 by default), and log-transforms the result. Normalized values are stored in seurat[["RNA"]]@data.
+
+```{r}
+seurat <- NormalizeData(seurat, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+## Feature selection
+The seurat workflow starts with the selection of Highly variable genes that will be used for dimensionnal reduction and for the clustering. By taking only the top 2000 highly variable genes we considerabely decrease the time of the anlysis.
+
+```{r}
+seurat <- FindVariableFeatures(seurat, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(seurat), 10)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(seurat)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+CombinePlots(plots = list(plot1, plot2),ncol = 1)
+```
+
+## Scaling the data
+
+```{r}
+seurat <- ScaleData(seurat)
+```
+
+
+## Perform linear dimensional reduction
+
+PCA main ideas https://www.youtube.com/watch?v=HMOI_lkzW08
+PCA step by steps https://www.youtube.com/watch?v=FgakZw6K1QQ&t=8s
+We use 
+
+```{r}
+seurat <- RunPCA(seurat, features = VariableFeatures(object = seurat))
+```
+
+```{r}
+VizDimLoadings(seurat, dims = 1:2, reduction = "pca")
+```
+
+```{r}
+DimPlot(seurat, reduction = "pca")
+```
+
+```{r}
+DimPlot(seurat, reduction = "pca",group.by = "library_id")
+```
+
+
+## Inspect the first PCs
+```{r}
+
+firstPC_genes <- seurat@reductions$pca@feature.loadings[,c(1:5)]
+
+getTopGenes <- function(seurat, pc,ntop = 30) {
+  pc <- paste0("PC_",pc)
+  firstPC_genes <- seurat@reductions$pca@feature.loadings[,c(1:5)]
+  topFeatures <- firstPC_genes[order(abs(firstPC_genes[,pc]),decreasing = T)[c(1:ntop)],pc]
+  return(names(topFeatures))
+}
+
+topPC_features <- lapply(c(1:5), getTopGenes,seurat = seurat)
+
+```
+
+# Use g profiler to test top features for enrchiment 
+
+Enrichment Analysis: https://www.youtube.com/watch?v=udyAvvaMjfM
+
+```{r}
+results <- gprofiler(topPC_features,organism = "mmusculus",custom_bg = rownames(seurat))
+
+head(results,n=20)
+```
+
+The PC 2 clearly reflect the cell cycle.
+We can use the cyclone function from the package scran to assign a cell cycle phase to each cell.
+```{r}
+dir.create(path = "cyclone",showWarnings = F)
+gene_count_matrix <- as.matrix(GetAssayData(seurat))
+set.seed(100)
+mm.pairs <- readRDS(system.file("exdata", "mouse_cycle_markers.rds", package="scran"))
+
+#in order to use the genes pairs provided we need to convert them from ensembl_id to gene_short_name
+conversionTable <- gconvert(rownames(gene_count_matrix),organism = "mmusculus",target = "ENSG")
+
+gene_count_matrix <- gene_count_matrix[conversionTable$alias.number,]
+rownames(gene_count_matrix) <- conversionTable$target
+
+
+#ensembl <- mapIds(org.Mm.eg.db, keys=rownames(gene_count_matrix), keytype="SYMBOL", column="ENSEMBL")
+assignments <- cyclone(gene_count_matrix, mm.pairs, gene.names=rownames(gene_count_matrix))
+
+## add cell cycle phase to pData
+#print(head(assignments))
+seurat$phases <- assignments$phases
+seurat$G1_score <- assignments$scores$G1
+seurat$G2M_score <- assignments$scores$G2M
+seurat$S_score <- assignments$scores$S
+seurat$phases[which(seurat$phases=="G1")] <- "G1_G0"
+seurat$phases[which(seurat$phases=="G2M")] <- "G2_M"
+
+
+plot(assignments$score$G1, assignments$score$G2M, 
+     xlab="G1 score", ylab="G2/M score", pch=16)
+```
+
+
+The cyclone analysis confirm that PC_2 reflect the cell cycle effect.
+```{r}
+DimPlot(seurat,group.by = "phases")
+plot(-seurat@reductions$pca@cell.embeddings[,"PC_2"],seurat$G2M_score)
+
+```
+
+## Correcting cell cycle effect
+
+We can correct for cell cycle effect biais in the scaling step and rerun the pca on the scale and now corrected data.
+
+```{r}
+seurat <- ScaleData(seurat,vars.to.regress = c("G2M_score","S_score","G1_score"))
+seurat <- RunPCA(seurat, features = VariableFeatures(object = seurat))
+VizDimLoadings(seurat, dims = 1:2, reduction = "pca")
+
+```
+
+```{r}
+DimPlot(seurat,group.by = "phases")
+DimPlot(seurat,group.by = "library_id")
+DimPlot(seurat,group.by = "library_id",dims = c(2,3))
+
+```
+
+
+
+```{r, fig.height= 14,fig.width=8}
+DimHeatmap(seurat, dims = 1:15, cells = 2000, balanced = TRUE)
+```
+
+```{r}
+ElbowPlot(seurat)
+```
+
+## Cluster the cells
+
+```{r}
+seurat <- FindNeighbors(seurat, dims = 1:13)
+seurat <- FindClusters(seurat, resolution = 0.5)
+```
+## Run non-linear dimensional reduction (UMAP/tSNE)
+https://www.youtube.com/watch?v=NEaUSP4YerM
+```{r}
+seurat <- RunTSNE(seurat, dims = 1:13)
+
+DimPlot(seurat, reduction = "tsne")
+
+
+colorClusters <- c("#999999","#004949","#009292","#ff6db6","#ffb6db",
+                   "#490092","#006ddb","#b66dff","#6db6ff","#b6dbff",
+                   "#920000","#924900")
+
+DimPlot(seurat, reduction = "tsne",cols = colorClusters)
+
+```
+
+
+```{r, fig.height=8,fig.width=10}
+p1 <- DimPlot(seurat, reduction = "tsne",cols = colorClusters)
+p2 <- DimPlot(seurat, reduction = "tsne",group.by = "library_id")
+p3 <- DimPlot(seurat, reduction = "tsne",group.by = "phases")
+p4 <- FeaturePlot(seurat,reduction = "tsne",features = "nCount_RNA")
+
+CombinePlots(list(p1,p2,p3,p4))
+```
+```{r}
+seurat <- RunUMAP(seurat,dims = c(1:13))
+DimPlot(seurat)
+```
+
+
+```{r fig.height=8,fig.width=10}
+p1 <- DimPlot(seurat,cols = colorClusters)
+p2 <- DimPlot(seurat,group.by = "library_id")
+p3 <- DimPlot(seurat,group.by = "phases")
+p4 <- FeaturePlot(seurat,,features = "nCount_RNA")
+
+CombinePlots(list(p1,p2,p3,p4))
+
+```
+
+## Finding differentially expressed features (cluster biomarkers)
+
+```{r}
+markers <- FindAllMarkers(seurat, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+markers <- markers[which(markers$p_val_adj < 0.05),]
+```
+
+Violin plot for the top 5 markers for each clusters
+```{r fig.height=8,fig.width=10}
+for (cluster in unique(markers$cluster)) {
+  print(cluster)
+  print(VlnPlot(object = seurat,features = head(markers[which(markers$cluster==cluster),"gene"],9),pt.size = 0.01,cols = colorClusters))
+}
+```
+
+## Recover the clusters of the original study
+
+```{r}
+
+
+```
+
+
+Now we can rename the clusters
+```{r}
+
+Idents(seurat) <- seurat@meta.data$RNA_snn_res.0.5
+new.ident.name = c("diff","np1","rep","np2","pMk","pEr","pNeu","pMo1","pMast","pB","pT","pMo2")
+
+names(x = new.ident.name) <- levels(x = seurat)
+
+
+
+seurat <- RenameIdents(object = seurat, new.ident.name)
+
+
+
+## We choose an order that roughly follow proportion of cell type assigned with CaSTLe 
+
+
+clustersOrderFig1 <- c("np1","np2","diff","rep","pMk","pT","pB","pEr","pMo1","pMo2","pNeu","pMast")
+
+
+Idents(seurat) <- factor(Idents(seurat), levels = clustersOrderFig1) 
+seurat@meta.data$numclust <-Idents(seurat)
+
+DimPlot(seurat)
+
+
+```
+```{r fig.height=12,fig.width=8}
+selectedMarkers <- c("Mllt3","H2afy","Cd34","Lig1","Itga2b",
+                               "Il7r","Cd79a","Klf1","Fn1","Fcgr4","Mpo","Hdc")
+
+getFeaturePlot <- function(seurat,feature) {
+  p <- FeaturePlot(seurat,features = feature) + NoLegend()
+  return(p)
+}
+
+featureplots <- lapply(selectedMarkers,getFeaturePlot,seurat = seurat)
+
+plot <- cowplot::plot_grid(plotlist = featureplots,nrow=4)
+
+plot
+```
+
+## Save data for stream
+
+```{r}
+
+dataForStream <- GetAssayData(seurat,slot = "scale.data")
+dataForStream <- dataForStream[,rownames(seurat@meta.data)]
+
+
+
+dir.create("stream",showWarnings = F)
+
+write.table(seurat$numclust,"stream/rodriguezSeuratClusters.tsv",quote = FALSE,sep = "\t",col.names = FALSE,row.names = F)
+
+write.table(colorClusters,"stream/rodriguezColorClusters.tsv",quote = FALSE,sep = "\t",col.names = FALSE,row.names = F)
+
+
+write.table(dataForStream,"stream/rodriguezScaleDataForStream.tsv",quote = FALSE, sep = "\t",col.names = T)
+
+write.table(seurat$phases,"stream/rodriguezCellCyclePhases.tsv",quote = FALSE,sep = "\t",col.names = FALSE)
+
+write.table(seurat$library_id,"stream/rodriguezPredictedCellTypes.tsv",quote = FALSE,sep = "\t",col.names = FALSE)
+
+#write.table(cellColors,"/stream/rodriguezColorCellTypes.tsv",quote = FALSE,sep = "\t",col.names = FALSE,row.names = F)
+
+
+```
+
+
+```{r}
+colorClusters <- cbind(clustersOrderFig1,
+                       colorClusters)
+
+
+seurat = subset(seurat, idents = "pB",invert = TRUE)
+colorClusters = colorClusters[which(clustersOrderFig1!="pB"),]
+
+dataForStream <- GetAssayData(seurat,slot = "scale.data")
+dataForStream <- dataForStream[,rownames(seurat@meta.data)]
+
+
+
+dir.create("stream",showWarnings = F)
+
+write.table(seurat$numclust,"stream/rodriguezSeuratClusters.tsv",quote = FALSE,sep = "\t",col.names = FALSE,row.names = F)
+
+write.table(colorClusters,"stream/rodriguezColorClusters.tsv",quote = FALSE,sep = "\t",col.names = FALSE,row.names = F)
+
+
+write.table(dataForStream,"stream/rodriguezScaleDataForStream.tsv",quote = FALSE, sep = "\t",col.names = T)
+
+write.table(seurat$phases,"stream/rodriguezCellCyclePhases.tsv",quote = FALSE,sep = "\t",col.names = FALSE)
+
+write.table(seurat$library_id,"stream/rodriguezPredictedCellTypes.tsv",quote = FALSE,sep = "\t",col.names = FALSE)
+
+#write.table(cellColors,"/stream/rodriguezColorCellTypes.tsv",quote = FALSE,sep = "\t",col.names = FALSE,row.names = F)
+
+  
+
+
+
+```
+
