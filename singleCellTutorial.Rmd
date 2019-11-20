@@ -1,16 +1,65 @@
 ---
 title: "Single cell RNA-seq"
-author: "L??onard H??rault"
+author: "Leonard Herault"
 date: "November 12, 2019"
 output: html_document
+  code_folding: hide
 bibliography: biblio.bibtex
 ---
 
 ## Introduction
 
 This tutorial describe classical analysis of single-cell RNA seq data.
-We will use first public data of HSPCs generated with DropSeq protocol [@rodriguez2018clonal].
-First we will follow the very popular Seurat workflow [@stuart2019comprehensive].
+We will use the Rstudio server of IFB: https://rstudio.cluster.france-bioinformatique.fr
+We will work with public data of HSPCs generated with DropSeq protocol [@rodriguez2018clonal].
+First we will follow the very popular Seurat workflow [@stuart2019comprehensive] available here:
+https://satijalab.org/seurat/v3.1/pbmc3k_tutorial.html
+
+
+# Install packages if needed
+```{r}
+
+load.fun <- function(x) { 
+  x <- as.character(substitute(x)) 
+  if(isTRUE(x %in% .packages(all.available=TRUE))) { 
+    eval(parse(text=paste("require(", x, ")", sep=""))) 
+  } else { 
+    eval(parse(text=paste("install.packages('", x, "', repos = 'http://cran.us.r-project.org')", sep=""))) 
+    eval(parse(text=paste("require(", x, ")", sep=""))) 
+  } 
+} 
+
+load.bioc <- function(x) { 
+  x <- as.character(substitute(x)) 
+  if(isTRUE(x %in% .packages(all.available=TRUE))) { 
+    eval(parse(text=paste("require(", x, ")", sep=""))) 
+  } else { 
+    eval(parse(text="source('http://bioconductor.org/biocLite.R')"))
+    eval(parse(text=paste("biocLite('", x, "')", sep="")))
+  } 
+} 
+
+suppressMessages(load.fun("Seurat"))
+suppressMessages(load.fun("gProfileR"))
+suppressMessages(load.bioc("scran"))
+
+# Installation of monocle version 2 Be careful a version 3 is available now 
+suppressMessages(load.fun("VGAM"))
+suppressMessages(load.fun("DDRTree"))
+suppressMessages(load.bioc("HSMMSingleCell"))
+suppressMessages(load.fun("combinat"))
+suppressMessages(load.fun("fastICA"))
+suppressMessages(load.fun("densityClust"))
+suppressMessages(load.fun("qlcMatrix"))
+suppressMessages(load.fun("proxy"))
+suppressMessages(load.fun("slam"))
+suppressMessages(load.bioc("biocViews"))
+
+path <- "https://bioconductor.org/packages/release/bioc/src/contrib/monocle_2.14.0.tar.gz"
+suppressMessages(install.packages(path, repos=NULL, type="source"))
+
+```
+
 
 ```{r loadEnv, include=TRUE}
 library(Seurat)
@@ -18,11 +67,16 @@ library(tidyverse)
 library(gProfileR)
 library(scran)
 library(ggplot2)
+library(plyr)
+library(RColorBrewer)
+
 ```
 
 ## Download the data
 
 ```{r downloadData}
+
+
 
 LTHSC <- "ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM2411nnn/GSM2411664/suppl/GSM2411664_LTHSC.raw_umifm_counts.csv.gz"
 STHSC <- "ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM2411nnn/GSM2411668/suppl/GSM2411668_STHSC.raw_umifm_counts.csv.gz"
@@ -33,12 +87,14 @@ MPP4 <- "ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM2411nnn/GSM2411667/suppl/GSM2
 rodriguezDataUrl <- list(LTHSC,STHSC,MPP2,MPP3)
 
 downloadRodriguez <- function(url) {
-  dir.create("RodriguezData/",showWarnings = F)
-  download.file(url, destfile = paste0("RodriguezData/",basename(url)), method = "wget")
-
+  if(!file.exists(paste0("RodriguezData/",basename(url)))) {
+    dir.create("RodriguezData/",showWarnings = F)
+    download.file(url, destfile = paste0("RodriguezData/",basename(url)), method = "wget")
+  }
 }
 
 lapply(rodriguezDataUrl, downloadRodriguez)
+
 ```
 
 ## Load the data
@@ -75,6 +131,12 @@ head(seurat@meta.data)
 GetAssayData(seurat)[c(1:5),c(1:5)]
 nrow(seurat)
 ncol(seurat)
+
+
+
+seurat@meta.data$library_id <- factor(seurat@meta.data$library_id, levels = c("LTHSC","STHSC","MPP2","MPP3")) 
+colorCellType <- c(brewer.pal(4,"Set2"))[c(1,3,4,2)]
+
 ```
 
 ## Preprocessing of the data
@@ -177,26 +239,53 @@ seurat <- ScaleData(seurat)
 
 PCA main ideas https://www.youtube.com/watch?v=HMOI_lkzW08
 PCA step by steps https://www.youtube.com/watch?v=FgakZw6K1QQ&t=8s
-We use 
+We use the RunPCA function to do the PCA on the highly variable genes detected before.
 
 ```{r}
 seurat <- RunPCA(seurat, features = VariableFeatures(object = seurat))
 ```
 
+First we can compute the the proportion of variance explained by each principal componen of the PCA.
+
+```{r}
+
+pca_var <- apply(seurat@reductions$pca@cell.embeddings,2,var)
+prop_pca_var <- pca_var/sum(pca_var)
+
+barplot(prop_pca_var[c(1:20)], ylab = "proportion variance explained",las = 2)
+
+
+```
+We can also use the Elbow plot function of Seurat
+```{r}
+ElbowPlot(seurat)
+```
+
+We can the top genes for the first two principal components with the VizDimLoadings function.
 ```{r}
 VizDimLoadings(seurat, dims = 1:2, reduction = "pca")
 ```
+
+We can plot the cells within the two first component PCA space.
 
 ```{r}
 DimPlot(seurat, reduction = "pca")
 ```
 
+We can choose a meta.data column to color the cells using the group.by argument of the DimPlot function.
+
 ```{r}
-DimPlot(seurat, reduction = "pca",group.by = "library_id")
+DimPlot(seurat, reduction = "pca",group.by = "library_id",cols = colorCellType)
 ```
 
 
 ## Inspect the first PCs
+
+We we will use in the significant PCs in the next step of the analysis.
+But before that we need to inspect these PCs to see if we have some cofounding factors (cellular stress, cell cylce, library depth).
+To this aim we cab do enrichment analysis for the top genes of these PCs using the gProfileR packages.
+
+# get the top genes for the first PCs
 ```{r}
 
 firstPC_genes <- seurat@reductions$pca@feature.loadings[,c(1:5)]
@@ -223,8 +312,11 @@ head(results,n=20)
 ```
 
 The PC 2 clearly reflect the cell cycle.
-We can use the cyclone function from the package scran to assign a cell cycle phase to each cell.
+We will analyse cell cylce in more detail with  the cyclone function from the scran package.
+this function permits us to assign a cell cycle phase to each cell.
 ```{r}
+
+if(!file.exists("cyclone/assignments.rds")) {
 dir.create(path = "cyclone",showWarnings = F)
 gene_count_matrix <- as.matrix(GetAssayData(seurat))
 set.seed(100)
@@ -239,6 +331,9 @@ rownames(gene_count_matrix) <- conversionTable$target
 
 #ensembl <- mapIds(org.Mm.eg.db, keys=rownames(gene_count_matrix), keytype="SYMBOL", column="ENSEMBL")
 assignments <- cyclone(gene_count_matrix, mm.pairs, gene.names=rownames(gene_count_matrix))
+} else {
+  assignments <- readRDS("cyclone/assignments.rds")
+}
 
 ## add cell cycle phase to pData
 #print(head(assignments))
@@ -252,6 +347,8 @@ seurat$phases[which(seurat$phases=="G2M")] <- "G2_M"
 
 plot(assignments$score$G1, assignments$score$G2M, 
      xlab="G1 score", ylab="G2/M score", pch=16)
+
+saveRDS(assignments,"cyclone/assignments.rds")
 ```
 
 
@@ -276,28 +373,39 @@ VizDimLoadings(seurat, dims = 1:2, reduction = "pca")
 ```{r}
 DimPlot(seurat,group.by = "phases")
 DimPlot(seurat,group.by = "library_id")
-DimPlot(seurat,group.by = "library_id",dims = c(2,3))
+DimPlot(seurat,group.by = "library_id",dims = c(2,3),cols = colorCellType)
 
 ```
 
 
+DimHeatmap allows for easy exploration of the primary sources of heterogeneity in a dataset, and can be useful when trying to decide which PCs to include for further downstream analyses. Both cells and genes are ordered according to their PCA scores. 
 
 ```{r, fig.height= 14,fig.width=8}
 DimHeatmap(seurat, dims = 1:15, cells = 2000, balanced = TRUE)
 ```
 
+We choose the PCs to use according to the elbow plot.
 ```{r}
 ElbowPlot(seurat)
 ```
 
 ## Cluster the cells
+From Seurat tutorial:
+Seurat v3 applies a graph-based clustering approach,Seura first construct a KNN graph based on the euclidean distance in PCA space, and refine the edge weights between any two cells based on the shared overlap in their local neighborhoods (Jaccard similarity). This step is performed using the FindNeighbors function, and takes as input the previously defined dimensionality of the dataset (first 13 PCs).
 
+To cluster the cells, we next apply modularity optimization techniques such as the Louvain algorithm (default), to iteratively group cells together, with the goal of optimizing the standard modularity function (fraction of the edges that fall within the given groups minus the expected fraction if edges were distributed at random). The FindClusters function implements this procedure, and contains a resolution parameter that sets the ‘granularity’ of the downstream clustering, with increased values leading to a greater number of clusters. We find that setting this parameter between 0.4-1.2 typically returns good results for single-cell datasets of around 3K cells. Optimal resolution often increases for larger datasets. The clusters can be found using the Idents function.
 ```{r}
 seurat <- FindNeighbors(seurat, dims = 1:13)
 seurat <- FindClusters(seurat, resolution = 0.5)
 ```
 ## Run non-linear dimensional reduction (UMAP/tSNE)
-https://www.youtube.com/watch?v=NEaUSP4YerM
+From Seurat tutorial:
+Seurat offers several non-linear dimensional reduction techniques, such as tSNE and UMAP, to visualize and explore these datasets. The goal of these algorithms is to learn the underlying manifold of the data in order to place similar cells together in low-dimensional space. Cells within the graph-based clusters determined above should co-localize on these dimension reduction plots. As input to the UMAP and tSNE, we suggest using the same PCs as input to the clustering analysis.
+
+A video about t-SNE: https://www.youtube.com/watch?v=NEaUSP4YerM
+
+# T-SNE
+
 ```{r}
 seurat <- RunTSNE(seurat, dims = 1:13)
 
@@ -315,12 +423,15 @@ DimPlot(seurat, reduction = "tsne",cols = colorClusters)
 
 ```{r, fig.height=8,fig.width=10}
 p1 <- DimPlot(seurat, reduction = "tsne",cols = colorClusters)
-p2 <- DimPlot(seurat, reduction = "tsne",group.by = "library_id")
+p2 <- DimPlot(seurat, reduction = "tsne",group.by = "library_id",cols = colorCellType)
 p3 <- DimPlot(seurat, reduction = "tsne",group.by = "phases")
 p4 <- FeaturePlot(seurat,reduction = "tsne",features = "nCount_RNA")
 
 CombinePlots(list(p1,p2,p3,p4))
 ```
+
+# UMAP
+
 ```{r}
 seurat <- RunUMAP(seurat,dims = c(1:13))
 DimPlot(seurat)
@@ -329,7 +440,7 @@ DimPlot(seurat)
 
 ```{r fig.height=8,fig.width=10}
 p1 <- DimPlot(seurat,cols = colorClusters)
-p2 <- DimPlot(seurat,group.by = "library_id")
+p2 <- DimPlot(seurat,group.by = "library_id", cols = colorCellType)
 p3 <- DimPlot(seurat,group.by = "phases")
 p4 <- FeaturePlot(seurat,,features = "nCount_RNA")
 
@@ -337,25 +448,77 @@ CombinePlots(list(p1,p2,p3,p4))
 
 ```
 
-## Finding differentially expressed features (cluster biomarkers)
+## Finding differentially expressed genes (cluster biomarkers)
+From Seurat tutorial:
+Seurat can help you find markers that define clusters via differential expression. By default, it identifes positive and negative markers of a single cluster (specified in ident.1), compared to all other cells. FindAllMarkers automates this process for all clusters, but you can also test groups of clusters vs. each other, or against all cells.
+
+The min.pct argument requires a feature to be detected at a minimum percentage in either of the two groups of cells, and the thresh.test argument requires a feature to be differentially expressed (on average) by some amount between the two groups. You can set both of these to 0, but with a dramatic increase in time - since this will test a large number of features that are unlikely to be highly discriminatory. As another option to speed up these computations, max.cells.per.ident can be set. This will downsample each identity class to have no more cells than whatever this is set to. While there is generally going to be a loss in power, the speed increases can be significiant and the most highly differentially expressed features will likely still rise to the top.
+
 
 ```{r}
 markers <- FindAllMarkers(seurat, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
 markers <- markers[which(markers$p_val_adj < 0.05),]
 ```
 
-Violin plot for the top 5 markers for each clusters
+
+We can draw violin plot for the top 5 markers for each clusters.
 ```{r fig.height=8,fig.width=10}
 for (cluster in unique(markers$cluster)) {
   print(cluster)
-  print(VlnPlot(object = seurat,features = head(markers[which(markers$cluster==cluster),"gene"],9),pt.size = 0.01,cols = colorClusters))
+  print(VlnPlot(object = seurat,features = head(markers[which(markers$cluster==cluster),"gene"],9),pt.size = 0.01,cols = colorClusters)) +ggtitle(cluster)
 }
 ```
 
-## Recover the clusters of the original study
+# Analyze meta.data for each cluster
+
+We can create a data frame with count of meta data of interest for each cluster with ddply function from plyr package.
 
 ```{r}
+rowCountMeta <- ddply(seurat@meta.data,~seurat_clusters + library_id + phases ,nrow)
+head(rowCountMeta)
+```
 
+Then this dataframe can be easily used with ggplot.
+We can visualize the percentage of each cell type in each cluster:
+
+```{r}
+ggplot(data = rowCountMeta,aes(x = seurat_clusters, fill=library_id,y=V1)) +
+  geom_bar( stat="identity", position="fill") +
+  scale_y_continuous(name = "Cell type (%)", labels = c(0,25,50,75,100))+
+  ylab(label = "clusters")+xlab(label = "") +
+  coord_flip() +
+  scale_fill_manual(values = colorCellType)
+
+  #theme(legend.title=element_blank()) + 
+  
+```
+
+And also the percentage of cell cycle phases:
+
+```{r}
+ggplot(data = rowCountMeta,aes(x = seurat_clusters, fill=phases,y=V1)) +
+  geom_bar( stat="identity", position="fill") +
+  scale_y_continuous(name = "Cell type (%)", labels = c(0,25,50,75,100))+
+  ylab(label = "clusters")+xlab(label = "") +
+  coord_flip()
+```
+
+
+## Enrichment analysis of cluster markers
+To characterize the different cluster we will use gprofiler to tet markers enrichment for terms in different databases/ontologies (GO, KEG pathways, REACTOME...)
+
+```{r}
+#first we need to split the markers data frame in a list
+getMarkersFromClust <- function(cluster,markersTable) {
+  markers <- markersTable[which(markersTable$cluster == cluster),]
+  return(markers$gene)
+}
+
+markersList <- lapply(unique(markers$cluster),getMarkersFromClust,markersTable = markers)
+#rename list names because seurat start at 0
+names(markersList) <- c(0:(length(markersList)-1))
+
+gprofilerCluster <- gprofiler(markersList,organism = "mmusculus",custom_bg = rownames(seurat),src_filter = c("KEGG","REAC"))
 
 ```
 
@@ -364,7 +527,7 @@ Now we can rename the clusters
 ```{r}
 
 Idents(seurat) <- seurat@meta.data$RNA_snn_res.0.5
-new.ident.name = c("diff","np1","rep","np2","pMk","pEr","pNeu","pMo1","pMast","pB","pT","pMo2")
+new.ident.name = c("rep","diff","np1","np2","pEr","pMk","pNeu","pMo1","pMast","pB","pT","pMo2")
 
 names(x = new.ident.name) <- levels(x = seurat)
 
@@ -387,6 +550,9 @@ DimPlot(seurat)
 
 
 ```
+
+
+FeaturePlot function can be used to visualize some specific gene expression in the reduced space.
 ```{r fig.height=12,fig.width=8}
 selectedMarkers <- c("Mllt3","H2afy","Cd34","Lig1","Itga2b",
                                "Il7r","Cd79a","Klf1","Fn1","Fcgr4","Mpo","Hdc")
@@ -403,65 +569,67 @@ plot <- cowplot::plot_grid(plotlist = featureplots,nrow=4)
 plot
 ```
 
-## Save data for stream
+## Pseudotime ordering with monocle
 
-```{r}
+Altough a version 3 in monocle is available we will work with the version 2 (because I am used to it ;) ).
+first we need to create a monocle object, we will use directly the scale data of seurat that have been cell cycle regressed.
+It contains only the higly variable genes detected by seurat, those we will use the same 2000 genes for seurat and monocle data processing.
 
-dataForStream <- GetAssayData(seurat,slot = "scale.data")
-dataForStream <- dataForStream[,rownames(seurat@meta.data)]
+```{r }
+library("monocle")
+packageVersion("monocle")
 
+#seuratForMonocle = subset(seurat, idents = "pB",invert = TRUE)
 
+seuratScaleData <- GetAssayData(object = seurat, slot = "scale.data")[,rownames(seurat@meta.data)]
 
-dir.create("stream",showWarnings = F)
+pd <- new("AnnotatedDataFrame", data = seurat@meta.data)
+fd <- new("AnnotatedDataFrame", data = data.frame(gene_short_name = rownames(seuratScaleData)))
+rownames(fd) <- fd$gene_short_name
 
-write.table(seurat$numclust,"stream/rodriguezSeuratClusters.tsv",quote = FALSE,sep = "\t",col.names = FALSE,row.names = F)
+monocle <- newCellDataSet(seuratScaleData,
+                          phenoData = pd,
+                          featureData = fd,
+                          lowerDetectionLimit = 0.1,
+                          expressionFamily = uninormal())
 
-write.table(colorClusters,"stream/rodriguezColorClusters.tsv",quote = FALSE,sep = "\t",col.names = FALSE,row.names = F)
-
-
-write.table(dataForStream,"stream/rodriguezScaleDataForStream.tsv",quote = FALSE, sep = "\t",col.names = T)
-
-write.table(seurat$phases,"stream/rodriguezCellCyclePhases.tsv",quote = FALSE,sep = "\t",col.names = FALSE)
-
-write.table(seurat$library_id,"stream/rodriguezPredictedCellTypes.tsv",quote = FALSE,sep = "\t",col.names = FALSE)
-
-#write.table(cellColors,"/stream/rodriguezColorCellTypes.tsv",quote = FALSE,sep = "\t",col.names = FALSE,row.names = F)
+fData(monocle)$use_for_ordering <- TRUE
 
 
 ```
 
-
+We use the DDRTree algorythm of monocle 2 to construct the trajectory.
 ```{r}
-colorClusters <- cbind(clustersOrderFig1,
-                       colorClusters)
+print("Reducing dimension by DDRTree...")
 
+monocle <- reduceDimension(monocle,
+                           max_components = 2,
+                           reduction_method = 'DDRTree',
+                           norm_method = "none",
+                           pseudo_expr = 0,
+                           verbose = F)
 
-seurat = subset(seurat, idents = "pB",invert = TRUE)
-colorClusters = colorClusters[which(clustersOrderFig1!="pB"),]
+print("Ordering cells...")
 
-dataForStream <- GetAssayData(seurat,slot = "scale.data")
-dataForStream <- dataForStream[,rownames(seurat@meta.data)]
+monocle <- orderCells(monocle)
+```
+```{r}
+trajectoryState <- plot_cell_trajectory(monocle)
+trajectoryCluster <- plot_cell_trajectory(monocle,color_by = "numclust")
+trajectoryCellType <- plot_cell_trajectory(monocle,color_by = "library_id")
 
+trajectoryState
+trajectoryCellType
+trajectoryCluster
+```
+```{r}
 
-
-dir.create("stream",showWarnings = F)
-
-write.table(seurat$numclust,"stream/rodriguezSeuratClusters.tsv",quote = FALSE,sep = "\t",col.names = FALSE,row.names = F)
-
-write.table(colorClusters,"stream/rodriguezColorClusters.tsv",quote = FALSE,sep = "\t",col.names = FALSE,row.names = F)
-
-
-write.table(dataForStream,"stream/rodriguezScaleDataForStream.tsv",quote = FALSE, sep = "\t",col.names = T)
-
-write.table(seurat$phases,"stream/rodriguezCellCyclePhases.tsv",quote = FALSE,sep = "\t",col.names = FALSE)
-
-write.table(seurat$library_id,"stream/rodriguezPredictedCellTypes.tsv",quote = FALSE,sep = "\t",col.names = FALSE)
-
-#write.table(cellColors,"/stream/rodriguezColorCellTypes.tsv",quote = FALSE,sep = "\t",col.names = FALSE,row.names = F)
-
+for (c in unique(pData(monocle)[,"numclust"])) {
+  pData(monocle)$clustOfInterest <- FALSE
+  pData(monocle)[which(pData(monocle)[,"numclust"] == c),"clustOfInterest"] <- TRUE
   
+  print(plot_cell_trajectory(monocle,color_by="clustOfInterest") + ggtitle(c))
 
-
-
+}
 ```
 
