@@ -3,7 +3,6 @@ title: "Single cell RNA-seq"
 author: "Leonard Herault"
 date: "November 12, 2019"
 output: html_document
-  code_folding: hide
 bibliography: biblio.bibtex
 ---
 
@@ -14,6 +13,14 @@ We will use the Rstudio server of IFB: https://rstudio.cluster.france-bioinforma
 We will work with public data of HSPCs generated with DropSeq protocol [@rodriguez2018clonal].
 First we will follow the very popular Seurat workflow [@stuart2019comprehensive] available here:
 https://satijalab.org/seurat/v3.1/pbmc3k_tutorial.html
+
+# First check the directory
+
+```{r}
+getwd()
+list.files("../")
+```
+
 
 
 # Install packages if needed
@@ -87,9 +94,9 @@ MPP4 <- "ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM2411nnn/GSM2411667/suppl/GSM2
 rodriguezDataUrl <- list(LTHSC,STHSC,MPP2,MPP3)
 
 downloadRodriguez <- function(url) {
-  if(!file.exists(paste0("RodriguezData/",basename(url)))) {
-    dir.create("RodriguezData/",showWarnings = F)
-    download.file(url, destfile = paste0("RodriguezData/",basename(url)), method = "wget")
+  if(!file.exists(paste0("../RodriguezData/",basename(url)))) {
+    dir.create("../RodriguezData/",showWarnings = F)
+    download.file(url, destfile = paste0("../RodriguezData/",basename(url)), method = "wget")
   }
 }
 
@@ -101,7 +108,7 @@ lapply(rodriguezDataUrl, downloadRodriguez)
 
 ```{r loadData}
 
-files <- list.files("RodriguezData/",full.names = T) 
+files <- list.files("../RodriguezData/",full.names = T) 
 datasets <- lapply(files, read_csv)
 
 rodriguezData <- rbind(datasets[[1]],datasets[[2]],datasets[[3]],datasets[[4]])
@@ -316,8 +323,8 @@ We will analyse cell cylce in more detail with  the cyclone function from the sc
 this function permits us to assign a cell cycle phase to each cell.
 ```{r}
 
-if(!file.exists("cyclone/assignments.rds")) {
-dir.create(path = "cyclone",showWarnings = F)
+if(!file.exists("../cyclone/assignments.rds")) {
+dir.create(path = "../cyclone",showWarnings = F)
 gene_count_matrix <- as.matrix(GetAssayData(seurat))
 set.seed(100)
 mm.pairs <- readRDS(system.file("exdata", "mouse_cycle_markers.rds", package="scran"))
@@ -331,8 +338,9 @@ rownames(gene_count_matrix) <- conversionTable$target
 
 #ensembl <- mapIds(org.Mm.eg.db, keys=rownames(gene_count_matrix), keytype="SYMBOL", column="ENSEMBL")
 assignments <- cyclone(gene_count_matrix, mm.pairs, gene.names=rownames(gene_count_matrix))
+saveRDS(assignments,"../cyclone/assignments.rds")
 } else {
-  assignments <- readRDS("cyclone/assignments.rds")
+  assignments <- readRDS("../cyclone/assignments.rds")
 }
 
 ## add cell cycle phase to pData
@@ -571,7 +579,7 @@ plot
 
 ## Pseudotime ordering with monocle
 
-Altough a version 3 in monocle is available we will work with the version 2 (because I am used to it ;) ).
+Altough a version 3 in monocle is available we will work with the version 2 [@monocle] [(because I am used to it ;) ).
 first we need to create a monocle object, we will use directly the scale data of seurat that have been cell cycle regressed.
 It contains only the higly variable genes detected by seurat, those we will use the same 2000 genes for seurat and monocle data processing.
 
